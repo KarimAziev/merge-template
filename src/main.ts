@@ -67,7 +67,7 @@ export function copyFilter(file: string) {
     'package-json-overrides.json',
   ];
   const name = path.basename(file);
-  const result = omitNames.includes(name);
+  const result = !omitNames.includes(name);
 
   return result;
 }
