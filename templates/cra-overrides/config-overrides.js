@@ -9,6 +9,7 @@ const {
 const webpack = require('webpack');
 const path = require('path');
 const fs = require('fs');
+const child_process = require('child_process');
 
 function Found() {}
 
@@ -79,10 +80,44 @@ const setupNodePolyfills = (config) => {
   return config;
 };
 
+const getTSConfig = () => {
+  try {
+    const program = path.join(__dirname, 'node_modules', '.bin', 'tsc');
+    const stdout = child_process.execSync(`${program} --showConfig`);
+    const config = JSON.parse(stdout);
+    return config;
+  } catch (error) {
+    return {};
+  }
+};
+
+const getAliases = () => {
+  const tsConfig = getTSConfig();
+  const compilerOptions = (tsConfig && tsConfig.compilerOptions) || {};
+  const { paths } = compilerOptions;
+  const baseUrl = path.resolve(
+    __dirname,
+    compilerOptions && path.resolve(compilerOptions.baseUrl || './'),
+  );
+  const tsAliasToWebpackAlias = (alias) => alias.replace(/\/?[*]/gm, '');
+  return (
+    paths &&
+    Object.keys(paths).reduce((acc, key) => {
+      const alias = tsAliasToWebpackAlias(key);
+      const aliasPaths = paths[key].map((relativePath) =>
+        path.resolve(baseUrl, tsAliasToWebpackAlias(relativePath)),
+      );
+      acc[alias] = aliasPaths.length === 1 ? aliasPaths[0] : aliasPaths;
+      return acc;
+    }, {})
+  );
+};
+
 const addAliases = (config) => {
   const linkedPackages = process.env !== 'production' && links(__dirname);
+  const tsconfigAliases = getAliases();
   const defaultAliases = {
-    '@': path.resolve(__dirname, 'src'),
+    ...tsconfigAliases,
     path: require.resolve('path-browserify'),
   };
 
@@ -99,7 +134,6 @@ const addAliases = (config) => {
   if (hasLinkedPackages) {
     console.log('Starting with linked packages:\n', linkedPackages.join('\n'));
   }
-
   return addWebpackAlias(aliases)(config);
 };
 

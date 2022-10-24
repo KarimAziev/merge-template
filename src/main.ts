@@ -257,6 +257,13 @@ merge-template --template path-to-template
     console.error(`chdir: ${err}`);
   }
 
+  if (modelJson.scripts) {
+    await updatePackageJson(path.dirname(packageJsonFile), {
+      scripts: { ...packageJson.scripts, ...modelJson.scripts },
+    });
+    console.log('merged package scripts');
+  }
+
   await new Listr([
     {
       title: 'Copy project files',
