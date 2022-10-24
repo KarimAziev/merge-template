@@ -1,7 +1,4 @@
 {
-  "scripts": {
-    "prepare": "husky install"
-  },
   "dependencies": {
     "@emotion/react": "^11.10.4",
     "@emotion/styled": "^11.10.4",
@@ -26,7 +23,6 @@
     "typescript": "^4.6.4"
   },
   "devDependencies": {
-    "@types/ramda": "^0.28.15",
     "@types/react": "^17.0.50",
     "@types/react-dom": "^17.0.2",
     "@types/react-router": "^5.1.19",
@@ -61,7 +57,16 @@
     "node-sass": "^4.12.0",
     "tslint-config-airbnb": "^5.11.2"
   },
-  "deleteDevDeps": {
-    "eslint-plugin-react-hooks": "^1.7.0"
-  }
+  "mergeSections": {
+    "scripts": {
+      "prepare": "husky install",
+      "pre-commit": "lint-staged"
+    }
+  },
+  "addSections": {
+    "lint-staged": {
+      "src/**/*.{js,jsx,json}": ["prettier --write", "eslint", "git add"]
+    }
+  },
+  "removeSections": ["eslintConfig"]
 }

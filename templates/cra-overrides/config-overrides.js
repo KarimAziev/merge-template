@@ -71,6 +71,7 @@ const setupNodePolyfills = (config) => {
     url: require.resolve('url'),
   });
   config.resolve.fallback = fallback;
+
   config.plugins = (config.plugins || []).concat([
     new webpack.ProvidePlugin({
       process: 'process/browser',

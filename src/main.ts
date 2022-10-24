@@ -9,6 +9,14 @@ import path from 'path';
 import { promisify } from 'util';
 import defaultModelJson from './config.json' assert { type: 'json' };
 
+const ignoreInTemplateDirNames = [
+  'node_modules',
+  'build',
+  'dist',
+  '.git',
+  'package-json-overrides.json',
+];
+
 export interface PackageJson {
   dependencies?: {
     [key: string]: string;
@@ -17,12 +25,18 @@ export interface PackageJson {
     [key: string]: string;
   };
 }
+
 export interface ModelJson extends PackageJson {
   deleteDependencies?: {
     [key: string]: string;
   };
   deleteDevDependencies?: {
     [key: string]: string;
+  };
+  addSections?: object;
+  removeSections?: string[];
+  mergeSections?: {
+    [key: string]: any;
   };
 }
 
@@ -43,31 +57,20 @@ export const writeFile = promisify(fs.writeFile);
 export const copy = promisify(ncp);
 export const createDir = promisify(fs.mkdir);
 
-export const overrideJsonFile = (file: string, newObj: object) => {
+export async function mergeJsonFile(file: string, overrides: object) {
   const obj = JSON.parse(fs.readFileSync(file, 'utf8'));
-  const updatedObj = Object.assign(obj, newObj);
+  const updatedObj = Object.assign(obj, overrides);
   const newStr = JSON.stringify(updatedObj);
   return writeFile(file, newStr, 'utf8');
-};
+}
 
-export async function updatePackageJson(
-  targetDirectory: string,
-  overrides: object
-) {
-  const file = path.join(targetDirectory, 'package.json');
-  return overrideJsonFile(file, overrides);
+export async function writeJsonFile(file: string, updatedObj: object) {
+  return writeFile(file, JSON.stringify(updatedObj, null, 2), 'utf8');
 }
 
 export function copyFilter(file: string) {
-  const omitNames = [
-    'node_modules',
-    'build',
-    'dist',
-    '.git',
-    'package-json-overrides.json',
-  ];
   const name = path.basename(file);
-  const result = !omitNames.includes(name);
+  const result = !ignoreInTemplateDirNames.includes(name);
 
   return result;
 }
@@ -121,23 +124,13 @@ export function resolveCurrentGitProject() {
   return dir;
 }
 
-export const makeDeleteTasks = (
-  dependenciesToRemove: string[],
-  packageJson: {
-    dependencies?: { [key: string]: string };
-    devDependencies?: { [key: string]: string };
-  }
-) => {
-  const { dependencies, devDependencies } = packageJson;
-  const allDeps = { ...dependencies, ...devDependencies };
-  const tasks = R.intersection(dependenciesToRemove, Object.keys(allDeps)).map(
-    (dependency) => ({
-      title: `'Removing ${dependency}`,
-      task: () => execa('yarn', ['remove', dependency]),
-    })
-  );
-  return new Listr(tasks);
+export const makeDeleteTasks = (dependenciesToRemove: string[]) => {
+  return dependenciesToRemove.map((dependency) => ({
+    title: `Uninstall ${dependency}`,
+    task: () => execa('yarn', ['remove', dependency]),
+  }));
 };
+
 export const installOrUpdateTask = (
   dependency: string,
   version: string,
@@ -150,10 +143,12 @@ export const installOrUpdateTask = (
     `${dependency}@${version}`,
     ...(flags || []),
   ];
-  const prefix = installedVersion ? 'Updating' : 'Installing';
+  const title = installedVersion
+    ? `Update ${dependency}@${installedVersion} to ${version}`
+    : `Install ${dependency}@${version}`;
 
   return {
-    title: `${prefix} ${dependency}@${version}`,
+    title,
     enabled: () => installedVersion !== version,
     task: () => execa('yarn', args),
   } as ListrTask;
@@ -179,7 +174,7 @@ export const makeInstallOrUpdateTasks = (
     ...makeTasks(modelPackageJson.dependencies || {}),
     ...makeTasks(modelPackageJson.devDependencies || {}, ['-D']),
   ];
-  return new Listr(requiredDeps, { exitOnError: false });
+  return requiredDeps;
 };
 
 export function readJsonFileSync(file: string) {
@@ -193,14 +188,21 @@ export function readJsonFileSync(file: string) {
 const promptInstall = async (
   modelJson: ModelJson,
   packageJson: PackageJson,
-  skipPrompts?: boolean
+  skipPrompts?: boolean,
+  noInstall?: boolean
 ) => {
+  if (noInstall) {
+    return [];
+  }
   const requiredDeps = Object.keys({
     ...modelJson.dependencies,
     ...modelJson.devDependencies,
   });
   if (skipPrompts) {
-    return makeInstallOrUpdateTasks(modelJson, packageJson);
+    return R.compose(
+      R.filter(R.compose(R.when(R.is(Function), R.call), R.prop('enabled'))),
+      makeInstallOrUpdateTasks
+    )(modelJson, packageJson);
   } else {
     const deps: { [key: string]: string[] } = await inquirer.prompt([
       {
@@ -216,8 +218,40 @@ const promptInstall = async (
       devDependencies: R.pick(okeys),
     })(modelJson);
 
-    return makeInstallOrUpdateTasks(confirmed, packageJson);
+    return R.compose(
+      R.filter(R.compose(R.when(R.is(Function), R.call), R.prop('enabled'))),
+      makeInstallOrUpdateTasks
+    )(confirmed, packageJson);
   }
+};
+
+const updatePackageJson = (
+  packageJson: PackageJson,
+  modelJson: ModelJson,
+  packageJsonFile: string
+) => {
+  new Promise((res) => {
+    if (
+      !modelJson.mergeSections &&
+      !modelJson.addSections &&
+      !modelJson.removeSections
+    ) {
+      return res(packageJson);
+    }
+    Object.keys(modelJson.mergeSections || {}).forEach((key) => {
+      packageJson[key] = {
+        ...packageJson[key],
+        ...(modelJson.mergeSections as { [key: string]: any })[key],
+      };
+    });
+    if (modelJson.addSections) {
+      packageJson = { ...packageJson, ...modelJson.addSections };
+    }
+    if (modelJson.removeSections) {
+      packageJson = R.omit(modelJson.removeSections as string[], packageJson);
+    }
+    return writeJsonFile(packageJsonFile, packageJson).then(res);
+  });
 };
 
 export async function cli() {
@@ -257,37 +291,54 @@ merge-template --template path-to-template
     console.error(`chdir: ${err}`);
   }
 
-  if (modelJson.scripts) {
-    await updatePackageJson(path.dirname(packageJsonFile), {
-      scripts: { ...packageJson.scripts, ...modelJson.scripts },
-    });
-    console.log('merged package scripts');
-  }
-
-  await new Listr([
-    {
-      title: 'Copy project files',
-      enabled: () => !noCopy && !!templateDir && fs.existsSync(templateDir),
-      task: () => copyTemplateFiles(templateDir as string, projectRoot),
-    },
-    {
-      title: 'Install or update',
-      enabled: () => !noInstall,
-      task: () => promptInstall(modelJson, packageJson, skipPrompts),
-    },
-    {
-      title: 'Delete dependencies',
-      enabled: () => !noDelete,
-      task: () =>
-        makeDeleteTasks(
+  const dependencyTasks = await promptInstall(
+    modelJson,
+    packageJson,
+    skipPrompts,
+    noInstall
+  );
+  const templateFiles =
+    !noCopy && !!templateDir && fs.existsSync(templateDir)
+      ? fs
+          .readdirSync(templateDir)
+          .filter((item) => !ignoreInTemplateDirNames.includes(item))
+      : [];
+  const uninstallDeps = noDelete
+    ? []
+    : makeDeleteTasks(
+        R.intersection(
           Object.keys({
             ...modelJson.deleteDependencies,
             ...modelJson.deleteDevDependencies,
           }),
-          packageJson
-        ),
+          Object.keys({
+            ...packageJson.dependencies,
+            ...packageJson.devDependencies,
+          })
+        )
+      );
+  const tasks = [...dependencyTasks, ...uninstallDeps].concat({
+    title: `Processing package json`,
+    enabled: () =>
+      modelJson.mergeSections ||
+      modelJson.addSections ||
+      modelJson.removeSections,
+    task: () => {
+      updatePackageJson(packageJson, modelJson, packageJsonFile);
     },
-  ]).run();
+  });
+
+  if (templateFiles.length > 0) {
+    tasks.push({
+      title: `Add to project ${templateFiles.join(', ')}`,
+      task: () => copyTemplateFiles(templateDir as string, projectRoot),
+    });
+  }
+  tasks.push({
+    title: 'Renaming material-ui imports to mui',
+    task: () => execa('npx', ['@mui/codemod', 'v5.0.0/preset-safe', 'src']),
+  });
+  await new Listr(tasks, { exitOnError: false }).run();
 }
 
 function parseArgumentsIntoOptions(rawArgs: string[]) {
