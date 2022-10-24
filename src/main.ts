@@ -259,16 +259,29 @@ export async function cli() {
   if (options.help) {
     console.log(
       `Usage:
-Run in project root:
 
-merge-template --template path-to-template
+Run in your project root:
 
+merge-template --template /path/to/template-directory
+
+--template         directory with package-json-overrides.json (required) and other files to include
+--no-install       skip installation step
+--no-copy          skip copy step
+--no-delete        skip delete section step
+--no-mui-codemod   skip mui codemod
 `
     );
     return;
   }
-  const { skipPrompts, templateDir, projectRoot, noInstall, noCopy, noDelete } =
-    options;
+  const {
+    noMuiCodemode,
+    skipPrompts,
+    templateDir,
+    projectRoot,
+    noInstall,
+    noCopy,
+    noDelete,
+  } = options;
   const packageJsonFile =
     projectRoot && path.resolve(projectRoot as string, 'package.json');
   if (!projectRoot || !packageJsonFile || !templateDir) {
@@ -334,10 +347,13 @@ merge-template --template path-to-template
       task: () => copyTemplateFiles(templateDir as string, projectRoot),
     });
   }
-  tasks.push({
-    title: 'Renaming material-ui imports to mui',
-    task: () => execa('npx', ['@mui/codemod', 'v5.0.0/preset-safe', 'src']),
-  });
+  if (!noMuiCodemode) {
+    tasks.push({
+      title: 'Rename material-ui imports to mui',
+      task: () => execa('npx', ['@mui/codemod', 'v5.0.0/preset-safe', 'src']),
+    });
+  }
+
   await new Listr(tasks, { exitOnError: false }).run();
 }
 
@@ -349,6 +365,7 @@ function parseArgumentsIntoOptions(rawArgs: string[]) {
       '--no-install': Boolean,
       '--no-copy': Boolean,
       '--no-delete': Boolean,
+      '--no-mui-codemod': Boolean,
       '--help': Boolean,
       '-g': '--git',
       '-y': '--yes',
@@ -368,6 +385,7 @@ function parseArgumentsIntoOptions(rawArgs: string[]) {
     noInstall: args['--no-install'] || false,
     noDelete: args['--no-delete'] || false,
     noCopy: args['--no-copy'] || false,
+    noMuiCodemode: args['--no-codemode'] || false,
   };
 }
 
