@@ -11,18 +11,19 @@
     "merge-template": "./bin/merge-template.js"
   },
   "files": [
-    "./templates",
-    "./lib/",
-    "./bin"
+    "templates",
+    "lib",
+    "bin",
+    "src"
   ],
   "type": "module",
-  "main": "./lib/main",
+  "main": "./lib/main.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "node start-dev.mjs",
     "setup": "npm update && npm install",
     "clean": "rimraf -rf lib",
-    "build": "tsc",
+    "build": "node ./node_modules/.bin/tsc",
     "prebuild": "npm-run-all -s clean",
     "prepublishOnly": "npm-run-all -s build",
     "start:fast": "node lib/main.js",
