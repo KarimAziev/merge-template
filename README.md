@@ -1,6 +1,7 @@
 # merge-template
 
-Merge your project with predefined templates or customs.
+Merge your project with predefined templates or customs, install
+dependencies and apply some codemods.
 
 ## Installation
 
@@ -10,17 +11,19 @@ npm install merge-template -g
 
 ## Usage
 
-### With default template
-
-Run in project root:
+To use default default template and files run in your project root:
 
 ```example
 merge-template
 ```
 
+### With default template
+
 It will:
 
-1. install or update `dependencies` and `devDependencies` listed in template directory (see default [template](<[./templates/cra-overrides](./templates/cra-overrides)>)) with `package-json-overrides.json`.
+- install or update `dependencies` and `devDependencies` listed in
+  [package-json-overrides.json](./templates/cra-overrides) (by
+  default).
 
 You can skip this step with option `--no-install`:
 
@@ -28,148 +31,83 @@ You can skip this step with option `--no-install`:
 merge-template --no-install
 ```
 
-2. copy all files from [./templates/cra-overrides](./templates/cra-overrides) except `package-json-overrides.json` to your project
+- copy all files from
+  [./templates/cra-overrides](./templates/cra-overrides) (or custom
+  template directory) to your project.
 
-> **NOTE**: files and directories from template directory will
+> **NOTE**: files and directories from the template directory will
 > **override** existing files.
 
-You can skip this step with option `--no-copy`:
+You can skip this step with the option `--no-copy-files` or use your own
+template (see section [Customization](#Customization)).
 
 ```example
-merge-template --no-copy
+merge-template --no-copy-files
 ```
 
-3. modify **package.json** in your project by rules specified in `package-json-overrides.json`.
-
-4. migrate @material-ui/core to @mui.
-
-You can skip this step with option `--no-mui-codemod`:
-
-```example
-merge-template --no-mui-codemod
-```
+- modify `package.json` in your project by rules specified in
+  `package-json-overrides.json`.
 
 ## Customization
 
-You can specify other template directory, only one file is required -
-`package-json-overrides.json`.
+### Command line options
+
+```example
+
+--template                    use template directory with package-json-overrides.json (required) and files to copy
+--no-install                  skip installation step
+--no-copy-files               don't copy files from template directory
+--no-delete                   don't delete dependencies listed in "deleteDependencies" in package-json-overrides.json
+--no-post-tasks               don't execute post tasks (section "postTasks" in package-json-overrides.json)
+--ignore-files                files in template directory that should't be copied into project. Default: 'node_modules' 'build' 'dist' '.git' 'package-json-overrides.json'
+```
+
+You can specify your own template directory with option `--template`. It
+must include a file `package-json-overrides.json`.
 
 ```example
 merge-template --template /home/user/my-custom-template-directory/
 ```
 
-Here `/home/user/my-custom-template-directory/` must include a file
-`package-json-overrides.json`. Any other directories and files will be
-copy into your project root `overriding` existing ones.
+Any other directories and files in this directory will be copied into
+your project root, `overriding` existing ones.
 
 ### package-json-overrides.json
 
-This file should be json and can contain following sections:
+This file should be JSON and can contain the following sections:
 
-1.  **dependencies**
+1.  `dependencies`
 
-    Same as in package.json, will be installed or updated to specified
-    version.
+    The format is the as in `package.json` dependencies, it will be
+    installed or updated to specified version.
 
-2.  **devDependencies**
+2.  `devDependencies`
 
-    Same as in package.json, will be installed or updated to specified
-    version.
+    The format is the as in `package.json` devDependencies, it will be
+    installed or updated to specified version.
 
-3.  **deleteDependencies**
+3.  `deleteDependencies`
 
-    Dependencies to remove. Format is the as in package.json
-    dependencies, versions will be ignored.
+    Dependencies to remove. The format is the as in `package.json`
+    dependencies, but versions will be ignored.
 
-4.  **mergeSections**
+4.  `mergeSections`
 
     The value of this section will be merged into existing
     `package.json`.
 
-    `package-json-overrides.json`
+5.  `addSections`
 
-    ```example
-    "mergeSections": {
-        "scripts": {
-          "prepare": "husky install",
-          "pre-commit": "lint-staged"
-        }
-     }
-    ```
+    The value will be added to the existing `package.json`, overriding
+    existing sections.
 
-    and in your `package.json`:
+    1.  `postTasks`
 
-    ```example
-    "scripts": {
-       "start": "node index.js"
-      }
-    ```
+        Shell commands to execute after other steps.
 
-    The result will be:
+        Nested lists where each element is an array of form [command,
+        …args], e.g.:
 
-    ```example
-    "scripts": {
-       "start": "node index.js",
-       "prepare": "husky install",
-       "pre-commit": "lint-staged"
-      }
-    ```
-
-5.  **addSections**
-
-    The value will be added to existing `package.json`, overriding
-    existing sections with the same keys.
-
-    ```example
-    "addSections": {
-      "lint-staged": {
-        "src/**/*.{js,jsx,json}": ["prettier --write", "eslint", "git add"]
-      },
-     },
-    ```
-
-6.  **removeSections**
-
-    The value should be the array of sections from `package.json` to
-    remove.
-
-    ```example
-    "removeSections": ["eslintConfig"],
-    ```
-
-### Example of package-json-overrides.json:
-
-```example
-  {
-  "dependencies": {
-    "react": "^17.0.2",
-    "react-dom": "^17.0.2",
-    "react-router": "^5.2.0",
-    "react-router-dom": "^5.2.0",
-  },
-  "devDependencies": {
-    "@types/react": "^17.0.50",
-    "@types/react-dom": "^17.0.2",
-    "@types/react-router": "^5.1.19",
-    "@types/react-router-dom": "^5.3.3"
-  },
-  "deleteDependencies": {
-    "enzyme-adapter-react-16": "^1.14.0",
-    "less-loader": "^5.0.0",
-    "node-sass": "^4.12.0",
-    "tslint-config-airbnb": "^5.11.2"
-  },
-  "mergeSections": {
-    "scripts": {
-      "prepare": "husky install",
-      "pre-commit": "lint-staged"
-    }
-  },
-  "addSections": {
-    "lint-staged": {
-      "src/**/*.{js,jsx,json}": ["prettier --write", "eslint", "git add"]
-    }
-  },
-  "removeSections": ["eslintConfig"]
-}
-```
+        ```example
+        "postTasks": [["npx", "@mui/codemod", "v5.0.0/preset-safe", "src"]]
+        ```

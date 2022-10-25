@@ -7,7 +7,6 @@ import Listr, { ListrTask } from 'listr';
 import ncp from 'ncp';
 import path from 'path';
 import { promisify } from 'util';
-import defaultModelJson from './config.json' assert { type: 'json' };
 
 const ignoreInTemplateDirNames = [
   'node_modules',
@@ -38,6 +37,7 @@ export interface ModelJson extends PackageJson {
   mergeSections?: {
     [key: string]: any;
   };
+  postTasks: [string[]];
 }
 
 export const getPredefinedTemplate = (template: string) => {
@@ -257,30 +257,16 @@ const updatePackageJson = (
 export async function cli() {
   const options = parseArgumentsIntoOptions(process.argv);
   if (options.help) {
-    console.log(
-      `Usage:
-
-Run in your project root:
-
-merge-template --template /path/to/template-directory
-
---template         directory with package-json-overrides.json (required) and other files to include
---no-install       skip installation step
---no-copy          skip copy step
---no-delete        skip delete section step
---no-mui-codemod   skip mui codemod
-`
-    );
-    return;
+    return showHelp();
   }
   const {
-    noMuiCodemode,
     skipPrompts,
     templateDir,
     projectRoot,
     noInstall,
     noCopy,
     noDelete,
+    noPostTasks,
   } = options;
   const packageJsonFile =
     projectRoot && path.resolve(projectRoot as string, 'package.json');
@@ -292,10 +278,9 @@ merge-template --template /path/to/template-directory
     'package-json-overrides.json'
   );
 
-  const modelJson =
-    packageJsonModelFile && fs.existsSync(packageJsonModelFile)
-      ? JSON.parse(fs.readFileSync(packageJsonModelFile, 'utf8'))
-      : defaultModelJson;
+  const modelJson: ModelJson = JSON.parse(
+    fs.readFileSync(packageJsonModelFile, 'utf8')
+  );
   const packageJson = JSON.parse(fs.readFileSync(packageJsonFile, 'utf8'));
 
   try {
@@ -316,6 +301,7 @@ merge-template --template /path/to/template-directory
           .readdirSync(templateDir)
           .filter((item) => !ignoreInTemplateDirNames.includes(item))
       : [];
+
   const uninstallDeps = noDelete
     ? []
     : makeDeleteTasks(
@@ -330,16 +316,18 @@ merge-template --template /path/to/template-directory
           })
         )
       );
-  const tasks = [...dependencyTasks, ...uninstallDeps].concat({
-    title: `Processing package json`,
-    enabled: () =>
-      modelJson.mergeSections ||
-      modelJson.addSections ||
-      modelJson.removeSections,
-    task: () => {
-      updatePackageJson(packageJson, modelJson, packageJsonFile);
+  const tasks = [...dependencyTasks, ...uninstallDeps].filter(Boolean).concat([
+    {
+      title: `Processing package json`,
+      enabled: () =>
+        !!modelJson.mergeSections ||
+        !!modelJson.addSections ||
+        !!modelJson.removeSections,
+      task: () => {
+        updatePackageJson(packageJson, modelJson, packageJsonFile);
+      },
     },
-  });
+  ]);
 
   if (templateFiles.length > 0) {
     tasks.push({
@@ -347,26 +335,52 @@ merge-template --template /path/to/template-directory
       task: () => copyTemplateFiles(templateDir as string, projectRoot),
     });
   }
-  if (!noMuiCodemode) {
-    tasks.push({
-      title: 'Rename material-ui imports to mui',
-      task: () => execa('npx', ['@mui/codemod', 'v5.0.0/preset-safe', 'src']),
+  if (!noPostTasks && modelJson.postTasks) {
+    modelJson.postTasks.forEach((task) => {
+      const command = task[0];
+      const args = task.slice(1) || [];
+
+      tasks.push({
+        title: `Running ${command} ${args.join(' ')}`,
+        task: () => execa(command, args),
+      });
     });
   }
 
   await new Listr(tasks, { exitOnError: false }).run();
 }
 
+function showHelp() {
+  console.log(
+    `Usage:
+
+Run in your project root:
+
+merge-template
+
+Options:
+
+--template                  use template directory with package-json-overrides.json (required) and other files to include
+--no-install                skip installation step
+--no-copy-files             don't copy files from template directory
+--no-delete                 don't delete dependencies listed in "deleteDependencies" in package-json-overrides.json
+--no-post-tasks             don't execute post tasks (section "postTasks" in package-json-overrides.json)
+--ignore-files              files in template directory that should't be copied into project. Default: 'node_modules' 'build' 'dist' '.git' 'package-json-overrides.json'
+`
+  );
+}
+
 function parseArgumentsIntoOptions(rawArgs: string[]) {
   const args = arg(
     {
-      '--yes': Boolean,
       '--template': String,
       '--no-install': Boolean,
-      '--no-copy': Boolean,
+      '--no-copy-files': Boolean,
       '--no-delete': Boolean,
-      '--no-mui-codemod': Boolean,
+      '--no-post-tasks': Boolean,
+      '--ignore-files': [String],
       '--help': Boolean,
+      '--yes': Boolean,
       '-g': '--git',
       '-y': '--yes',
       '-p': '--template',
@@ -384,8 +398,9 @@ function parseArgumentsIntoOptions(rawArgs: string[]) {
     projectRoot: args._[0] || resolveCurrentGitProject(),
     noInstall: args['--no-install'] || false,
     noDelete: args['--no-delete'] || false,
-    noCopy: args['--no-copy'] || false,
-    noMuiCodemode: args['--no-codemode'] || false,
+    noCopy: args['--no-copy-files'] || false,
+    noPostTasks: args['--no-post-tasks'] || false,
+    ignoreFiles: args['--ignore-files'] || ignoreInTemplateDirNames,
   };
 }
 
