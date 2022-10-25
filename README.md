@@ -101,13 +101,10 @@ This file should be JSON and can contain the following sections:
     The value will be added to the existing `package.json`, overriding
     existing sections.
 
-    1.  `postTasks`
+6.  `postTasks`
 
-        Shell commands to execute after other steps.
+    Shell commands to execute after other steps. Nested lists where each element is an array of form [command, …args], e.g.:
 
-        Nested lists where each element is an array of form [command,
-        …args], e.g.:
-
-        ```example
-        "postTasks": [["npx", "@mui/codemod", "v5.0.0/preset-safe", "src"]]
-        ```
+```example
+"postTasks": [["npx", "@mui/codemod", "v5.0.0/preset-safe", "src"]]
+```
