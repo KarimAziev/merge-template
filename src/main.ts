@@ -7,6 +7,10 @@ import Listr, { ListrTask } from 'listr';
 import ncp from 'ncp';
 import path from 'path';
 import { promisify } from 'util';
+import dns from 'dns';
+import { execSync } from 'child_process';
+import spawn from 'cross-spawn';
+import url from 'url';
 
 const ignoreInTemplateDirNames = [
   'node_modules',
@@ -24,7 +28,9 @@ export interface PackageJson {
     [key: string]: string;
   };
 }
-
+export interface DependenciesHash {
+  [key: string]: string;
+}
 export interface ModelJson extends PackageJson {
   deleteDependencies?: {
     [key: string]: string;
@@ -68,20 +74,90 @@ export async function writeJsonFile(file: string, updatedObj: object) {
   return writeFile(file, JSON.stringify(updatedObj, null, 2), 'utf8');
 }
 
-export function copyFilter(file: string) {
+function getProxy() {
+  if (process.env.https_proxy) {
+    return process.env.https_proxy;
+  } else {
+    try {
+      let httpsProxy = execSync('npm config get https-proxy').toString().trim();
+      return httpsProxy !== 'null' ? httpsProxy : undefined;
+    } catch (e) {
+      return;
+    }
+  }
+}
+
+export function copyFilter(file: string, filesToIgnore: string[]) {
   const name = path.basename(file);
-  const result = !ignoreInTemplateDirNames.includes(name);
+  const result = !filesToIgnore.includes(name);
 
   return result;
 }
+function checkIfOnline() {
+  return new Promise((resolve) => {
+    dns.lookup('registry.yarnpkg.com', (err) => {
+      let proxy;
+      if (err != null && (proxy = getProxy())) {
+        dns.lookup(url.parse(proxy).hostname as string, (proxyErr) => {
+          resolve(proxyErr == null);
+        });
+      } else {
+        resolve(err == null);
+      }
+    });
+  });
+}
+function install(
+  root: string,
+  dependencies: string[],
+  verbose: boolean,
+  isOnline: boolean
+) {
+  return new Promise<void>((resolve, reject) => {
+    const command = 'yarn';
+    const args = ['add', '--exact'].concat(dependencies);
+    if (!isOnline) {
+      args.push('--offline');
+    }
 
+    // Explicitly set cwd() to work around issues like
+    // https://github.com/facebook/create-react-app/issues/3326.
+    // Unfortunately we can only do this for Yarn because npm support for
+    // equivalent --prefix flag doesn't help with this issue.
+    // This is why for npm, we run checkThatNpmCanReadCwd() early instead.
+    args.push('--cwd');
+    args.push(root);
+
+    if (!isOnline) {
+      console.log('You appear to be offline.');
+      console.log('Falling back to the local Yarn cache.');
+      console.log();
+    }
+
+    if (verbose) {
+      args.push('--verbose');
+    }
+
+    const child = spawn(command, args, { stdio: 'inherit' });
+    child.on('close', (code) => {
+      if (code !== 0) {
+        reject({
+          command: `${command} ${args.join(' ')}`,
+        });
+        return;
+      }
+      resolve();
+    });
+  });
+}
 export async function copyTemplateFiles(
   sourceDir: string,
-  targetDirectory: string
+  targetDirectory: string,
+  filesToIgnore: string[]
 ) {
   await copy(sourceDir, targetDirectory, {
     clobber: true,
-    filter: copyFilter,
+    filter: (file) => copyFilter(file, filesToIgnore),
   });
 }
 
@@ -114,6 +190,7 @@ export const isInstalled = (
 
 export function resolveCurrentGitProject() {
   let dir = process.cwd();
+
   const shouldUp = (d: string) =>
     fs.existsSync(d) && !fs.existsSync(path.resolve(d, '.git'));
 
@@ -124,11 +201,21 @@ export function resolveCurrentGitProject() {
   return dir;
 }
 
-export const makeDeleteTasks = (dependenciesToRemove: string[]) => {
-  return dependenciesToRemove.map((dependency) => ({
-    title: `Uninstall ${dependency}`,
-    task: () => execa('yarn', ['remove', dependency]),
-  }));
+export const makeDeleteTasks = (
+  dependenciesToRemove: string[],
+  isOnline: boolean
+) => {
+  if (dependenciesToRemove.length > 0) {
+    const flags = isOnline ? [] : ['--offline'];
+    return [
+      {
+        title: `Uninstall ${dependenciesToRemove.join(' ')}`,
+        task: () =>
+          execa('yarn', ['remove', ...dependenciesToRemove, ...flags]),
+      },
+    ];
+  }
+  return [];
 };
 
 export const installOrUpdateTask = (
@@ -154,6 +241,77 @@ export const installOrUpdateTask = (
   } as ListrTask;
 };
 
+export interface GroupedDependencies {
+  upgrade: string[];
+  add: string[];
+  flags: string[];
+}
+export const makeInstallationBatchTasks = (
+  modelPackageJson: {
+    dependencies?: { [key: string]: string };
+    devDependencies?: { [key: string]: string };
+  },
+  packageJson: {
+    dependencies?: { [key: string]: string };
+    devDependencies?: { [key: string]: string };
+  },
+  projectRoot: string,
+  isOnline: boolean
+) => {
+  const filterDependencies = (
+    requiredDependencies: DependenciesHash,
+    type: 'dependencies' | 'devDependencies'
+  ) => {
+    const flags = !isOnline ? ['--offline'] : [];
+    if (type === 'devDependencies') {
+      flags.push('-D');
+    }
+    return Object.keys(requiredDependencies || {}).reduce(
+      (acc, key) => {
+        const requiredVersion = requiredDependencies[key];
+        const installedVersion = R.path([type, key], packageJson);
+        if (!installedVersion) {
+          acc.add.push(`${key}@${requiredVersion}`);
+        }
+
+        if (installedVersion && installedVersion !== requiredVersion) {
+          acc.upgrade.push(`${key}@${requiredVersion}`);
+        }
+        return acc;
+      },
+      { upgrade: [], add: [], flags } as GroupedDependencies
+    );
+  };
+
+  const dependencies = filterDependencies(
+    modelPackageJson.dependencies || {},
+    'dependencies'
+  );
+
+  const devDependencies = filterDependencies(
+    modelPackageJson.devDependencies || {},
+    'devDependencies'
+  );
+  return [dependencies, devDependencies].reduce((tasks, group) => {
+    const description = group.flags.includes('-D') ? 'devDependencies' : '';
+    if (group.add.length > 0) {
+      const addTask = {
+        title: `Add ${description} ${group.add.join(' ')} ${description} `,
+        task: () => install(projectRoot, group.add, false, isOnline),
+      };
+      tasks.push(addTask);
+    }
+    if (group.upgrade.length > 0) {
+      const updateTask = {
+        title: `Update ${description} ${group.upgrade.join(' ')}`,
+        task: () =>
+          execa('yarn', ['upgrade', ...group.upgrade, ...group.flags]),
+      };
+      tasks.push(updateTask);
+    }
+    return tasks;
+  }, [] as ListrTask[]);
+};
 export const makeInstallOrUpdateTasks = (
   modelPackageJson: {
     dependencies?: { [key: string]: string };
@@ -165,14 +323,15 @@ export const makeInstallOrUpdateTasks = (
   }
 ) => {
   const { dependencies, devDependencies } = packageJson;
+
   const allDeps = { ...dependencies, ...devDependencies };
   const makeTasks = (data: object, flags?: string[]) =>
     Object.keys(data).map((dep) =>
       installOrUpdateTask(dep, data[dep], allDeps, flags)
     );
   const requiredDeps = [
-    ...makeTasks(modelPackageJson.dependencies || {}),
-    ...makeTasks(modelPackageJson.devDependencies || {}, ['-D']),
+    ...makeTasks(modelPackageJson.dependencies || {}, ['--exact']),
+    ...makeTasks(modelPackageJson.devDependencies || {}, ['-D', '--exact']),
   ];
   return requiredDeps;
 };
@@ -185,7 +344,7 @@ export function readJsonFileSync(file: string) {
     console.error(err);
   }
 }
-const promptInstall = async (
+export const promptInstall = async (
   modelJson: ModelJson,
   packageJson: PackageJson,
   skipPrompts?: boolean,
@@ -207,7 +366,7 @@ const promptInstall = async (
     const deps: { [key: string]: string[] } = await inquirer.prompt([
       {
         type: 'checkbox',
-        message: 'Dependencies to install or update',
+        message: 'Dependencies to install or upgrade',
         name: 'Install',
         choices: requiredDeps.map((name) => ({ name, checked: true })),
       },
@@ -260,14 +419,15 @@ export async function cli() {
     return showHelp();
   }
   const {
-    skipPrompts,
     templateDir,
     projectRoot,
     noInstall,
     noCopy,
     noDelete,
     noPostTasks,
+    ignoreFiles,
   } = options;
+
   const packageJsonFile =
     projectRoot && path.resolve(projectRoot as string, 'package.json');
   if (!projectRoot || !packageJsonFile || !templateDir) {
@@ -281,20 +441,24 @@ export async function cli() {
   const modelJson: ModelJson = JSON.parse(
     fs.readFileSync(packageJsonModelFile, 'utf8')
   );
-  const packageJson = JSON.parse(fs.readFileSync(packageJsonFile, 'utf8'));
+  const packageJson: PackageJson = JSON.parse(
+    fs.readFileSync(packageJsonFile, 'utf8')
+  );
 
   try {
     process.chdir(projectRoot);
   } catch (err) {
     console.error(`chdir: ${err}`);
   }
-
-  const dependencyTasks = await promptInstall(
-    modelJson,
-    packageJson,
-    skipPrompts,
-    noInstall
-  );
+  const isOnline = await checkIfOnline();
+  const dependencyTasks = noInstall
+    ? []
+    : makeInstallationBatchTasks(
+        modelJson,
+        packageJson,
+        projectRoot,
+        !!isOnline
+      );
   const templateFiles =
     !noCopy && !!templateDir && fs.existsSync(templateDir)
       ? fs
@@ -314,9 +478,10 @@ export async function cli() {
             ...packageJson.dependencies,
             ...packageJson.devDependencies,
           })
-        )
+        ),
+        !!isOnline
       );
-  const tasks = [...dependencyTasks, ...uninstallDeps].filter(Boolean).concat([
+  const tasks = [...uninstallDeps, ...dependencyTasks].concat([
     {
       title: `Processing package json`,
       enabled: () =>
@@ -332,7 +497,8 @@ export async function cli() {
   if (templateFiles.length > 0) {
     tasks.push({
       title: `Add to project ${templateFiles.join(', ')}`,
-      task: () => copyTemplateFiles(templateDir as string, projectRoot),
+      task: () =>
+        copyTemplateFiles(templateDir as string, projectRoot, ignoreFiles),
     });
   }
   if (!noPostTasks && modelJson.postTasks) {
