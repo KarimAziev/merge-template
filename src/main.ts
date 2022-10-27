@@ -513,7 +513,7 @@ export async function cli() {
         ),
         !!isOnline
       );
-  const tasks = [...uninstallDeps, ...dependencyTasks].concat([
+  const tasks = [
     {
       title: `Processing package json`,
       enabled: () =>
@@ -524,7 +524,9 @@ export async function cli() {
         updatePackageJson(packageJson, modelJson, packageJsonFile);
       },
     },
-  ]);
+    ...uninstallDeps,
+    ...dependencyTasks,
+  ];
 
   if (templateFiles.length > 0) {
     tasks.push({
