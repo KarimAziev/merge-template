@@ -27,6 +27,9 @@ export interface PackageJson {
   devDependencies?: {
     [key: string]: string;
   };
+  peerDependencies?: {
+    [key: string]: string;
+  };
 }
 export interface DependenciesHash {
   [key: string]: string;
@@ -93,7 +96,7 @@ export function copyFilter(file: string, filesToIgnore: string[]) {
 
   return result;
 }
-function checkIfOnline() {
+export function checkIfOnline() {
   return new Promise((resolve) => {
     dns.lookup('registry.yarnpkg.com', (err) => {
       let proxy;
@@ -107,15 +110,16 @@ function checkIfOnline() {
     });
   });
 }
-function install(
+export function install(
   root: string,
   dependencies: string[],
   verbose: boolean,
-  isOnline: boolean
+  isOnline: boolean,
+  flags?: string[]
 ) {
   return new Promise<void>((resolve, reject) => {
     const command = 'yarn';
-    const args = ['add', '--exact'].concat(dependencies);
+    const args = ['add', '--exact'].concat(flags || []).concat(dependencies);
     if (!isOnline) {
       args.push('--offline');
     }
@@ -142,7 +146,7 @@ function install(
     child.on('close', (code) => {
       if (code !== 0) {
         reject({
-          command: `${command} ${args.join(' ')}`,
+          command: `${command} ${code} ${args.join(' ')}`,
         });
         return;
       }
@@ -164,12 +168,12 @@ export async function copyTemplateFiles(
 export function locateFile(baseName: string) {
   let dir = process.cwd();
   const shouldUp = (d: string) =>
-    fs.existsSync(d) && !fs.existsSync(path.resolve(d, baseName));
+    fs.existsSync(d) && !fs.existsSync(path.join(d, baseName));
 
   while (shouldUp(dir)) {
     dir = path.dirname(dir);
   }
-  if (fs.existsSync(path.resolve(dir, baseName))) {
+  if (fs.existsSync(path.join(dir, baseName))) {
     path.dirname(dir);
   }
   return dir;
@@ -190,14 +194,11 @@ export const isInstalled = (
 
 export function resolveCurrentGitProject() {
   let dir = process.cwd();
-
   const shouldUp = (d: string) =>
-    fs.existsSync(d) && !fs.existsSync(path.resolve(d, '.git'));
-
+    fs.existsSync(d) && !fs.existsSync(path.join(d, '.git'));
   while (shouldUp(dir)) {
     dir = path.dirname(dir);
   }
-
   return dir;
 }
 
@@ -245,33 +246,50 @@ export interface GroupedDependencies {
   upgrade: string[];
   add: string[];
   flags: string[];
+  remove: string[];
 }
+
+const flagsHash: Record<
+  'dependencies' | 'devDependencies' | 'peerDependencies',
+  string[]
+> = {
+  peerDependencies: ['-P', '--exact'],
+  devDependencies: ['-D', '--exact'],
+  dependencies: ['--exact'],
+};
 export const makeInstallationBatchTasks = (
-  modelPackageJson: {
-    dependencies?: { [key: string]: string };
-    devDependencies?: { [key: string]: string };
-  },
-  packageJson: {
-    dependencies?: { [key: string]: string };
-    devDependencies?: { [key: string]: string };
-  },
+  modelPackageJson: ModelJson,
+  packageJson: PackageJson,
   projectRoot: string,
-  isOnline: boolean
+  isOnline: boolean,
+  verbose: boolean
 ) => {
-  const filterDependencies = (
+  const devTypes = R.keys(flagsHash);
+  const groupDependencies = (
     requiredDependencies: DependenciesHash,
-    type: 'dependencies' | 'devDependencies'
+    type: keyof typeof flagsHash
   ) => {
-    const flags = !isOnline ? ['--offline'] : [];
-    if (type === 'devDependencies') {
-      flags.push('-D');
+    const flags = flagsHash[type].concat(
+      verbose ? ['--verbose', '--cwd', projectRoot] : ['--cwd', projectRoot]
+    );
+    if (!isOnline) {
+      flags.push('--offline');
     }
+
+    const otherTypes = devTypes.filter((v) => v !== type);
     return Object.keys(requiredDependencies || {}).reduce(
       (acc, key) => {
         const requiredVersion = requiredDependencies[key];
         const installedVersion = R.path([type, key], packageJson);
+
         if (!installedVersion) {
           acc.add.push(`${key}@${requiredVersion}`);
+        }
+        if (
+          !installedVersion &&
+          otherTypes.find((depType) => R.path([depType, key], packageJson))
+        ) {
+          acc.remove.push(key);
         }
 
         if (installedVersion && installedVersion !== requiredVersion) {
@@ -279,38 +297,48 @@ export const makeInstallationBatchTasks = (
         }
         return acc;
       },
-      { upgrade: [], add: [], flags } as GroupedDependencies
+      { upgrade: [], add: [], flags, remove: [] } as GroupedDependencies
     );
   };
 
-  const dependencies = filterDependencies(
-    modelPackageJson.dependencies || {},
-    'dependencies'
-  );
+  const dependenciesTasks = devTypes
+    .filter((type) => !!modelPackageJson[type])
+    .reduce(
+      (acc, dependencyType) => {
+        const group = groupDependencies(
+          modelPackageJson[dependencyType] || {},
+          dependencyType
+        );
 
-  const devDependencies = filterDependencies(
-    modelPackageJson.devDependencies || {},
-    'devDependencies'
-  );
-  return [dependencies, devDependencies].reduce((tasks, group) => {
-    const description = group.flags.includes('-D') ? 'devDependencies' : '';
-    if (group.add.length > 0) {
-      const addTask = {
-        title: `Add ${description} ${group.add.join(' ')} ${description} `,
-        task: () => install(projectRoot, group.add, false, isOnline),
-      };
-      tasks.push(addTask);
-    }
-    if (group.upgrade.length > 0) {
-      const updateTask = {
-        title: `Update ${description} ${group.upgrade.join(' ')}`,
-        task: () =>
-          execa('yarn', ['upgrade', ...group.upgrade, ...group.flags]),
-      };
-      tasks.push(updateTask);
-    }
-    return tasks;
-  }, [] as ListrTask[]);
+        if (group.add.length > 0) {
+          const taskArgs = ['add', ...group.add, ...group.flags];
+          const addTask = {
+            title: `yarn ${taskArgs.join(' ')}`,
+            task: () => execa('yarn', taskArgs),
+          };
+          acc.tasks.push(addTask);
+        }
+        if (group.upgrade.length > 0) {
+          const taskArgs = ['upgrade', ...group.upgrade, ...group.flags];
+          const updateTask = {
+            title: `yarn ${taskArgs.join(' ')}`,
+            task: () => execa('yarn', taskArgs),
+          };
+          acc.tasks.push(updateTask);
+        }
+
+        if (group.remove.length > 0) {
+          const removeTask = {
+            title: `yarn remove ${group.remove.join(' ')}`,
+            task: () => execa('yarn', ['remove', ...group.remove]),
+          };
+          acc.remove.push(removeTask);
+        }
+        return acc;
+      },
+      { remove: [], tasks: [] } as { remove: ListrTask[]; tasks: ListrTask[] }
+    );
+  return dependenciesTasks.remove.concat(dependenciesTasks.tasks);
 };
 export const makeInstallOrUpdateTasks = (
   modelPackageJson: {
@@ -397,6 +425,9 @@ const updatePackageJson = (
     ) {
       return res(packageJson);
     }
+    if (modelJson.removeSections) {
+      packageJson = R.omit(modelJson.removeSections as string[], packageJson);
+    }
     Object.keys(modelJson.mergeSections || {}).forEach((key) => {
       packageJson[key] = {
         ...packageJson[key],
@@ -405,9 +436,6 @@ const updatePackageJson = (
     });
     if (modelJson.addSections) {
       packageJson = { ...packageJson, ...modelJson.addSections };
-    }
-    if (modelJson.removeSections) {
-      packageJson = R.omit(modelJson.removeSections as string[], packageJson);
     }
     return writeJsonFile(packageJsonFile, packageJson).then(res);
   });
@@ -426,10 +454,12 @@ export async function cli() {
     noDelete,
     noPostTasks,
     ignoreFiles,
+    verbose,
   } = options;
 
   const packageJsonFile =
-    projectRoot && path.resolve(projectRoot as string, 'package.json');
+    projectRoot && path.join(projectRoot as string, 'package.json');
+
   if (!projectRoot || !packageJsonFile || !templateDir) {
     throw new Error('Project root not found');
   }
@@ -457,8 +487,10 @@ export async function cli() {
         modelJson,
         packageJson,
         projectRoot,
-        !!isOnline
+        !!isOnline,
+        verbose
       );
+
   const templateFiles =
     !noCopy && !!templateDir && fs.existsSync(templateDir)
       ? fs
@@ -505,7 +537,6 @@ export async function cli() {
     modelJson.postTasks.forEach((task) => {
       const command = task[0];
       const args = task.slice(1) || [];
-
       tasks.push({
         title: `Running ${command} ${args.join(' ')}`,
         task: () => execa(command, args),
@@ -532,6 +563,7 @@ Options:
 --no-delete                 don't delete dependencies listed in "deleteDependencies" in package-json-overrides.json
 --no-post-tasks             don't execute post tasks (section "postTasks" in package-json-overrides.json)
 --ignore-files              files in template directory that should't be copied into project. Default: 'node_modules' 'build' 'dist' '.git' 'package-json-overrides.json'
+--verbose                   verbose installation 
 `
   );
 }
@@ -545,6 +577,7 @@ function parseArgumentsIntoOptions(rawArgs: string[]) {
       '--no-delete': Boolean,
       '--no-post-tasks': Boolean,
       '--ignore-files': [String],
+      '--verbose': Boolean,
       '--help': Boolean,
       '--yes': Boolean,
       '-g': '--git',
@@ -567,6 +600,7 @@ function parseArgumentsIntoOptions(rawArgs: string[]) {
     noCopy: args['--no-copy-files'] || false,
     noPostTasks: args['--no-post-tasks'] || false,
     ignoreFiles: args['--ignore-files'] || ignoreInTemplateDirNames,
+    verbose: args['--verbose'] || false,
   };
 }
 
